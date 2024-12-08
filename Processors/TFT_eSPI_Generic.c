@@ -11,6 +11,7 @@
   SPIClass& spi = TFT_SPI_PORT;
 #else
   SPIClass& spi = SPI;
+  nrfx_spim_t spim3 = NRFX_SPIM_INSTANCE(3);
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -261,3 +262,80 @@ void TFT_eSPI::pushPixelsDMA(uint16_t* image, uint32_t len)
 void TFT_eSPI::pushImageDMA(int32_t x, int32_t y, int32_t w, int32_t h, uint16_t* image)
 
 */
+
+bool TFT_eSPI::initDMA(bool ctrl_cs) {
+  // DMA is already initialized on SPI3
+  DMA_Enabled = true;
+  return true;
+}
+
+void TFT_eSPI::pushPixelsDMA(uint16_t* image, uint32_t len) {
+  nrfx_spim_xfer_desc_t xfer_desc = NRFX_SPIM_XFER_TX(image, len);
+
+  if ((len == 0) || (!DMA_Enabled)) return;
+
+  dmaWait();
+
+  (void)nrfx_spim_xfer(&spim3, &xfer_desc, 0);
+}
+
+void TFT_eSPI::pushImageDMA(int32_t x, int32_t y, int32_t w, int32_t h, uint16_t* image, uint16_t* buffer) {
+  if ((x >= _vpW) || (y >= _vpH) || (!DMA_Enabled)) return;
+
+  _swapBytes = true;
+
+  int32_t dx = 0;
+  int32_t dy = 0;
+  int32_t dw = w;
+  int32_t dh = h;
+
+  if (x < _vpX) { dx = _vpX - x; dw -= dx; x = _vpX; }
+  if (y < _vpY) { dy = _vpY - y; dh -= dy; y = _vpY; }
+
+  if ((x + dw) > _vpW ) dw = _vpW - x;
+  if ((y + dh) > _vpH ) dh = _vpH - y;
+
+  if (dw < 1 || dh < 1) return;
+
+  uint32_t len = dw*dh;
+
+  if (buffer == nullptr) {
+    buffer = image;
+    dmaWait();
+  }
+
+  // If image is clipped, copy pixels into a contiguous block
+  if ( (dw != w) || (dh != h) ) {
+    for (int32_t yb = 0; yb < dh; yb++) {
+      memmove((uint8_t*) (buffer + yb * dw), (uint8_t*) (image + dx + w * (yb + dy)), dw << 1);
+    }
+  }
+  // else, if a buffer pointer has been provided copy whole image to the buffer
+  else if (buffer != image || _swapBytes) {
+    memcpy(buffer, image, len*2);
+  }
+
+  dmaWait(); // In case we did not wait earlier
+
+  setAddrWindow(x, y, dw, dh);
+  nrfx_spim_xfer_desc_t xfer_desc = NRFX_SPIM_XFER_TX(buffer, (size_t)(2 * dw * dh));
+  (void)nrfx_spim_xfer(&spim3, &xfer_desc, 0);
+}
+
+void TFT_eSPI::dmaWait(void) {
+  // Wait for the SPIM_END event to indicate transfer completion
+  int time = millis();
+  // SPI clock: 8–32 MHz → Timeout: 1ms
+  while (!nrf_spim_event_check(spim3.p_reg, NRF_SPIM_EVENT_END)) {
+    // Optionally, add a timeout mechanism to avoid infinite blocking
+    if (millis() >= time + 1)
+      break;
+  }
+
+  // Clear the event to prepare for the next transfer
+  nrf_spim_event_clear(spim3.p_reg, NRF_SPIM_EVENT_END);
+}
+
+bool TFT_eSPI::dmaBusy(void) {
+  return !nrf_spim_event_check(spim3.p_reg, NRF_SPIM_EVENT_END);
+}
